@@ -1,0 +1,26 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+    strict-inference: true
+  errors:
+    invalid_annotation_target: ignore
+
+linter:
+  rules:
+    # Avoid print in production
+    avoid_print: true
+    # All public APIs must be documented
+    public_member_api_docs: false  # relax for hackathon speed
+    # Prefer const constructors
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    # Null safety
+    avoid_null_checks_in_equality_operators: true
+    # Immutability
+    prefer_final_fields: true
+    prefer_final_locals: true
+    # Avoid implicit dynamic
+    avoid_dynamic_calls: true

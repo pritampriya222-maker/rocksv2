@@ -1,0 +1,81 @@
+name: offline_mesh_app
+description: Offline P2P mesh communication system for disaster resilience.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+  flutter: '>=3.16.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ============================================================
+  # STATE MANAGEMENT
+  # ============================================================
+  flutter_riverpod: ^2.4.9
+  riverpod: ^2.4.9
+  riverpod_annotation: ^2.3.3
+
+  # ============================================================
+  # BLE COMMUNICATION
+  # ============================================================
+  flutter_blue_plus: ^1.28.3
+
+  # ============================================================
+  # CRYPTOGRAPHY (pure Dart, libsodium-compatible)
+  # ============================================================
+  cryptography: ^2.5.0
+
+  # ============================================================
+  # QR CODE
+  # ============================================================
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^3.5.6
+
+  # ============================================================
+  # UTILITY
+  # ============================================================
+  uuid: ^4.5.3
+  convert: ^3.1.1
+  collection: ^1.18.0
+  equatable: ^2.0.5
+
+  # ============================================================
+  # UI / FONTS
+  # ============================================================
+  google_fonts: ^6.2.1
+  flutter_hooks: ^0.20.5
+  hooks_riverpod: ^2.4.9
+
+  # ============================================================
+  # NON-SENSITIVE SETTINGS ONLY
+  # ============================================================
+  shared_preferences: ^2.2.3
+
+  # ============================================================
+  # LOGGING (disable in release)
+  # ============================================================
+  logger: ^2.2.0
+  permission_handler: ^12.0.1
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+  path_provider: ^2.1.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.2
+  riverpod_generator: ^2.3.9
+  build_runner: ^2.4.8
+  custom_lint: ^0.6.2
+  riverpod_lint: ^2.3.9
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
+    - assets/icons/
