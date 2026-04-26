@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 import '../storage/database_service.dart';
-import '../../core/ble/ble_scanner_service.dart';
+import '../../core/ble/ble_manager.dart';
 import '../../core/ble/mesh_packet_router.dart';
 
 /// A UI model representing a plaintext public broadcast.
@@ -17,12 +17,13 @@ class PublicBroadcast {
 /// Manages the logic of receiving, saving, and rebroadcasting public messages.
 class GossipController extends StateNotifier<List<PublicBroadcast>> {
   final DatabaseService _dbService;
-  final BleScannerService _scannerService;
+  final BleManager _bleManager;
   final Uuid _uuid = const Uuid();
 
-  GossipController(this._dbService, this._scannerService) : super([]) {
+  GossipController(this._dbService, this._bleManager) : super([]) {
     _loadHistory();
   }
+
 
   /// Loads historical broadcasts from the persistent local database.
   Future<void> _loadHistory() async {
@@ -61,12 +62,7 @@ class GossipController extends StateNotifier<List<PublicBroadcast>> {
 
       // 4. Rebroadcast to all connected peers
       final encodedPacket = MeshPacketRouter.encodePublicPacket(jsonPayload);
-      
-      final peers = _scannerService.currentPeers;
-      for (final peer in peers) {
-        // Blindly flood the network to propagate the rumor
-        await _scannerService.writeToPeer(peer.remoteId.str, encodedPacket);
-      }
+      await _bleManager.broadcastPublicPacket(encodedPacket);
     } catch (e) {
       // Invalid JSON or missing fields, drop gracefully without crashing
     }
@@ -94,10 +90,7 @@ class GossipController extends StateNotifier<List<PublicBroadcast>> {
 
     // 4. Prepend the 0x02 Multiplexer Header and broadcast via BLE
     final encodedPacket = MeshPacketRouter.encodePublicPacket(jsonPayload);
-    
-    final peers = _scannerService.currentPeers;
-    for (final peer in peers) {
-      await _scannerService.writeToPeer(peer.remoteId.str, encodedPacket);
-    }
+    await _bleManager.broadcastPublicPacket(encodedPacket);
   }
 }
+

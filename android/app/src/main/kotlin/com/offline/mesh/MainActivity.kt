@@ -1,33 +1,50 @@
 package com.offline.mesh
 
-import com.offline.mesh.ble.BlePeripheralChannel
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import android.net.wifi.WifiManager
+import android.content.Context
 
 class MainActivity : FlutterActivity() {
-
-    private val channelName = "com.offline.mesh/ble_peripheral"
-    private var blePeripheralChannel: BlePeripheralChannel? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
-        val methodChannel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            channelName
-        )
+        try {
+            // Acquire MulticastLock to allow discovery packets
+            multicastLock = wifi.createMulticastLock("offlineMeshLock")
+            multicastLock?.setReferenceCounted(true)
+            multicastLock?.acquire()
 
-        blePeripheralChannel = BlePeripheralChannel(
-            context = applicationContext,
-            channel = methodChannel
-        )
+            // Acquire WifiLock - wrap in try-catch as some devices restrict this
+            wifiLock = wifi.createWifiLock(3, "offlineMeshWifiLock") // 3 = WIFI_MODE_FULL_HIGH_PERF
+            wifiLock?.setReferenceCounted(true)
+            wifiLock?.acquire()
+        } catch (e: Exception) {
+            // Fallback: Continue without locks if the OS restricts them
+        }
 
-        methodChannel.setMethodCallHandler(blePeripheralChannel)
+
+        
+        val channelName = "com.offline.mesh/anti_forensics"
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
+            if (call.method == "isMulticastLockActive") {
+                result.success(multicastLock?.isHeld ?: false)
+            } else {
+                result.notImplemented()
+            }
+        }
     }
 
     override fun onDestroy() {
+        multicastLock?.release()
+        wifiLock?.release()
         super.onDestroy()
-        blePeripheralChannel = null
     }
+
 }

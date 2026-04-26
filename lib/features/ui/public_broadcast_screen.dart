@@ -1,23 +1,61 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import '../broadcast/gossip_controller.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import '../../core/models/public_alert.dart';
 
-// Note: Declared as mock for UI compilation.
-final gossipProvider = StateNotifierProvider<GossipController, List<PublicBroadcast>>((ref) => throw UnimplementedError());
+import '../../providers/alert_providers.dart';
 
-/// The UI for viewing, creating, and manually relaying public alerts.
-class PublicBroadcastScreen extends ConsumerWidget {
+class PublicBroadcastScreen extends ConsumerStatefulWidget {
   const PublicBroadcastScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final broadcasts = ref.watch(gossipProvider);
+  ConsumerState<PublicBroadcastScreen> createState() => _PublicBroadcastScreenState();
+}
+
+class _PublicBroadcastScreenState extends ConsumerState<PublicBroadcastScreen> {
+  final Set<String> _selectedAlertIds = {};
+  bool _isSelectionMode = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final alerts = ref.watch(alertProvider);
 
     return Scaffold(
-      body: broadcasts.isEmpty
+      appBar: _isSelectionMode
+          ? AppBar(
+              title: Text('${_selectedAlertIds.length} Selected'),
+              leading: IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => setState(() {
+                  _isSelectionMode = false;
+                  _selectedAlertIds.clear();
+                }),
+              ),
+              actions: [
+                IconButton(
+                  icon: const Icon(Icons.qr_code_scanner),
+                  onPressed: () => _openScanner(context),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.qr_code_2),
+                  onPressed: () => _showBundleQr(context, alerts),
+                ),
+              ],
+            )
+          : AppBar(
+              title: const Text('PUBLIC ALERTS'),
+              actions: [
+                IconButton(
+                  icon: const Icon(Icons.qr_code_scanner),
+                  tooltip: 'Scan & Import Alerts',
+                  onPressed: () => _openScanner(context),
+                ),
+              ],
+            ),
+
+      body: alerts.isEmpty
           ? const Center(
               child: Text(
                 'No public alerts detected in the area.',
@@ -26,182 +64,202 @@ class PublicBroadcastScreen extends ConsumerWidget {
             )
           : ListView.builder(
               padding: const EdgeInsets.all(16),
-              itemCount: broadcasts.length,
+              itemCount: alerts.length,
               itemBuilder: (context, index) {
-                final broadcast = broadcasts[index];
-                return _buildAlertCard(context, broadcast);
+                final alert = alerts[index];
+                final isSelected = _selectedAlertIds.contains(alert.id);
+                
+                return GestureDetector(
+                  onLongPress: () {
+                    setState(() {
+                      _isSelectionMode = true;
+                      _selectedAlertIds.add(alert.id);
+                    });
+                  },
+                  onTap: () {
+                    if (_isSelectionMode) {
+                      setState(() {
+                        if (isSelected) {
+                          _selectedAlertIds.remove(alert.id);
+                          if (_selectedAlertIds.isEmpty) _isSelectionMode = false;
+                        } else {
+                          _selectedAlertIds.add(alert.id);
+                        }
+                      });
+                    } else {
+                      _showAlertDetails(context, alert);
+                    }
+                  },
+                  child: _buildAlertCard(alert, isSelected),
+                );
               },
             ),
-      floatingActionButton: Column(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          FloatingActionButton.small(
-            heroTag: 'qr_broadcast',
-            onPressed: () => _showQrOptions(context, ref, broadcasts.isNotEmpty ? broadcasts.first : null),
-            backgroundColor: Colors.white,
-            foregroundColor: Colors.black,
-            child: const Icon(Icons.qr_code_2),
+      floatingActionButton: _isSelectionMode
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: () => _showCreateAlertModal(context, ref),
+              backgroundColor: Colors.redAccent,
+              icon: const Icon(Icons.add_alert, color: Colors.white),
+              label: const Text('CREATE ALERT', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+            ),
+    );
+  }
+
+  Widget _buildAlertCard(PublicAlert alert, bool isSelected) {
+    return Card(
+      color: isSelected ? Colors.blueAccent.withValues(alpha: 0.2) : Colors.black,
+      shape: RoundedRectangleBorder(
+        side: BorderSide(
+          color: isSelected ? Colors.blueAccent : Color(alert.severity.colorValue),
+          width: isSelected ? 2 : 1,
+        ),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ListTile(
+        contentPadding: const EdgeInsets.all(16),
+        title: Text(
+          alert.severity.label,
+          style: TextStyle(
+            color: Color(alert.severity.colorValue),
+            fontWeight: FontWeight.bold,
+            fontSize: 12,
+            letterSpacing: 1.2,
           ),
-          const SizedBox(height: 16),
-          FloatingActionButton.extended(
-            heroTag: 'create_alert',
-            onPressed: () => _showCreateAlertModal(context, ref),
-            backgroundColor: Colors.orangeAccent,
-            icon: const Icon(Icons.warning_amber_rounded),
-            label: const Text('CREATE ALERT', style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-        ],
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 8),
+            Text(
+              alert.text,
+              style: const TextStyle(color: Colors.white, fontSize: 16),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Received: ${alert.createdAt.hour}:${alert.createdAt.minute.toString().padLeft(2, '0')}',
+              style: const TextStyle(color: Colors.grey, fontSize: 10),
+            ),
+          ],
+        ),
+        trailing: isSelected ? const Icon(Icons.check_circle, color: Colors.blueAccent) : null,
       ),
     );
   }
 
-  Widget _buildAlertCard(BuildContext context, PublicBroadcast broadcast) {
-    final date = DateTime.fromMillisecondsSinceEpoch(broadcast.timestamp);
-    final timeString = '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
-
-    return Card(
-      color: Colors.orange.withValues(alpha: 0.1),
-      shape: RoundedRectangleBorder(
-        side: const BorderSide(color: Colors.orangeAccent, width: 1),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      margin: const EdgeInsets.only(bottom: 16),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Row(
-                  children: [
-                    Icon(Icons.campaign, color: Colors.orangeAccent, size: 20),
-                    SizedBox(width: 8),
-                    Text('PUBLIC ALERT', style: TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold)),
-                  ],
-                ),
-                Text(timeString, style: const TextStyle(color: Colors.grey, fontSize: 12)),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Text(
-              broadcast.text,
-              style: const TextStyle(fontSize: 16, color: Colors.white, height: 1.4),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'ID: ${broadcast.id.substring(0, 8)}...',
-              style: const TextStyle(fontSize: 10, color: Colors.white54),
-            ),
-          ],
-        ),
+  void _showAlertDetails(BuildContext context, PublicAlert alert) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(alert.severity.label, style: TextStyle(color: Color(alert.severity.colorValue))),
+        content: Text(alert.text, style: const TextStyle(fontSize: 18)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CLOSE')),
+        ],
       ),
     );
   }
 
   void _showCreateAlertModal(BuildContext context, WidgetRef ref) {
     final textController = TextEditingController();
+    AlertSeverity selectedSeverity = AlertSeverity.medium;
 
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E1E),
       builder: (ctx) {
-        return Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(ctx).viewInsets.bottom,
-            left: 24,
-            right: 24,
-            top: 24,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Create Public Alert', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.orangeAccent)),
-              const SizedBox(height: 8),
-              const Text('This message will be sent in plaintext and permanently saved on all receiving devices in the mesh.', style: TextStyle(color: Colors.grey, fontSize: 13)),
-              const SizedBox(height: 16),
-              TextField(
-                controller: textController,
-                maxLength: 140, // Keep it short for simple QR compatibility
-                decoration: const InputDecoration(
-                  hintText: 'Describe the emergency...',
-                  border: OutlineInputBorder(),
-                ),
-                maxLines: 3,
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(ctx).viewInsets.bottom,
+                left: 24,
+                right: 24,
+                top: 24,
               ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent),
-                  onPressed: () {
-                    final text = textController.text.trim();
-                    if (text.isNotEmpty) {
-                      ref.read(gossipProvider.notifier).createAndSendBroadcast(text);
-                      Navigator.pop(ctx);
-                    }
-                  },
-                  child: const Text('BROADCAST ALERT', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-                ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('NEW PUBLIC ALERT', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.redAccent)),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: textController,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      hintText: 'Describe the emergency...',
+                      border: OutlineInputBorder(),
+                    ),
+                    maxLines: 2,
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('SEVERITY', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: AlertSeverity.values.map((s) {
+                      final isSelected = selectedSeverity == s;
+                      return ChoiceChip(
+                        label: Text(s.label),
+                        selected: isSelected,
+                        selectedColor: Color(s.colorValue),
+                        onSelected: (_) => setModalState(() => selectedSeverity = s),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                      onPressed: () {
+                        if (textController.text.isNotEmpty) {
+                          ref.read(alertProvider.notifier).addAlert(textController.text, selectedSeverity);
+                          Navigator.pop(ctx);
+                        }
+                      },
+                      child: const Text('BROADCAST TO MESH', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                ],
               ),
-              const SizedBox(height: 32),
-            ],
-          ),
+            );
+          },
         );
       },
     );
   }
 
-  void _showQrOptions(BuildContext context, WidgetRef ref, PublicBroadcast? latestBroadcast) {
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (ctx) {
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.qr_code_scanner),
-                title: const Text('Scan Incoming Broadcast'),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _openScanner(context, ref);
-                },
-              ),
-              if (latestBroadcast != null)
-                ListTile(
-                  leading: const Icon(Icons.qr_code_2),
-                  title: const Text('Show Latest Broadcast QR'),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _showLatestQr(context, latestBroadcast);
-                  },
-                ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  void _openScanner(BuildContext context, WidgetRef ref) {
+  void _openScanner(BuildContext context) {
     Navigator.push(
       context,
       MaterialPageRoute<void>(
-        builder: (_) => Scaffold(
-          appBar: AppBar(title: const Text('Scan Public Alert')),
+        builder: (ctx) => Scaffold(
+          appBar: AppBar(title: const Text('IMPORT ALERTS')),
           body: MobileScanner(
             onDetect: (capture) {
               final barcodes = capture.barcodes;
               for (final barcode in barcodes) {
-                final rawData = barcode.rawValue;
-                if (rawData != null && rawData.isNotEmpty) {
-                  // Process simple JSON immediately without GZIP/Base64 decode
-                  ref.read(gossipProvider.notifier).onBroadcastReceived(rawData);
-                  Navigator.pop(context);
-                  break;
+                final raw = barcode.rawValue;
+                if (raw != null && raw.startsWith('SPY_MESH_ALERTS:')) {
+                  try {
+                    final jsonStr = raw.replaceFirst('SPY_MESH_ALERTS:', '');
+                    final List<dynamic> data = jsonDecode(jsonStr);
+                    final alerts = data.map((a) => PublicAlert.fromJson(Map<String, dynamic>.from(a))).toList();
+                    
+                    ref.read(alertProvider.notifier).syncFromPeer(alerts);
+                    
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Imported ${alerts.length} Alerts from QR')),
+                    );
+                    break;
+                  } catch (e) {
+                    print('[Scanner] Import failed: $e');
+                  }
                 }
               }
             },
@@ -211,27 +269,34 @@ class PublicBroadcastScreen extends ConsumerWidget {
     );
   }
 
-  void _showLatestQr(BuildContext context, PublicBroadcast broadcast) {
-    // Generate simple JSON payload
-    final jsonPayload = jsonEncode({
-      'id': broadcast.id,
-      'text': broadcast.text,
-      'timestamp': broadcast.timestamp,
-    });
+  void _showBundleQr(BuildContext context, List<PublicAlert> allAlerts) {
+    final selectedAlerts = allAlerts.where((a) => _selectedAlertIds.contains(a.id)).toList();
+    
+    // Create dual-purpose payload: Human-readable header + App-optimized footer
+    final jsonPart = jsonEncode(selectedAlerts.map((a) => a.toJson()).toList());
+    final bundleText = 'SPY_MESH_ALERTS:$jsonPart';
 
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Broadcast QR', textAlign: TextAlign.center),
-        content: SizedBox(
-          width: 250,
-          height: 250,
-          child: QrImageView(
-            data: jsonPayload,
-            version: QrVersions.auto,
-            errorCorrectionLevel: QrErrorCorrectLevel.M,
-            backgroundColor: Colors.white,
-          ),
+        title: const Text('DEAD DROP QR', textAlign: TextAlign.center),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Anyone who scans this with the app will instantly import your alerts.', 
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: 250,
+              height: 250,
+              child: QrImageView(
+                data: bundleText,
+                version: QrVersions.auto,
+                backgroundColor: Colors.white,
+              ),
+            ),
+          ],
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('DONE')),
@@ -240,3 +305,4 @@ class PublicBroadcastScreen extends ConsumerWidget {
     );
   }
 }
+

@@ -86,13 +86,16 @@ final fragmentServiceProvider =
 /// Alternatively, override providers inside [ProviderScope.overrides] after
 /// awaiting the future in a loading screen.
 final appCryptoInitProvider = FutureProvider<void>((ref) async {
-  final ecdh = await EcdhManager.create();
+  // Legacy initialization — now handled in main.dart via IdentityService.
+  // final ecdh = await EcdhManager.create();
+
 
   // Override the placeholder providers with real instances
   // Note: Direct override not possible in Riverpod without container access.
   // Instead, this provider is used as a readiness flag; concrete instances
   // are injected via ProviderScope.overrides in main() — see below.
-  ref.onDispose(() async {
-    await ecdh.disposeAllSessions();
-  });
+  // ref.onDispose(() async {
+  //   await ecdh.disposeAllSessions();
+  // });
 });
+

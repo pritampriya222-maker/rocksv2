@@ -47,9 +47,11 @@ class FragmentService {
   Future<List<MessageFragment>> createFragments({
     required Uint8List plaintext,
     required SecretKey sessionKey,
+    bool isGroup = true,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final ttlMs = now + CryptoConstants.fragmentTtlMs;
+
 
     // --- Split plaintext into 3 chunks (40-30-30) ----------------------
     final chunks = _splitPlaintext(plaintext);
@@ -91,7 +93,9 @@ class FragmentService {
         hmacTag: macBytes,
         timestampMs: now,
         ttlMs: CryptoConstants.fragmentTtlMs,
+        isGroup: isGroup,
       ));
+
 
       // Zeroize plaintext chunk immediately
       SecureMemory.zeroizeUint8List(chunk);
@@ -133,8 +137,10 @@ class FragmentService {
           hmacTag: f.hmacTag,
           timestampMs: f.timestampMs,
           ttlMs: f.ttlMs,
+          isGroup: isGroup,
         ),
     ];
+
   }
 
   // --------------------------------------------------------------------------

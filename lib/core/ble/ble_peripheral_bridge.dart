@@ -38,13 +38,16 @@ class BlePeripheralBridge {
   Future<void> startAdvertising({
     required Uint8List pubKeyBytes,
     required String ephemeralUuid,
+    Uint8List? manufacturerData,
   }) async {
     await _channel.invokeMethod<void>('startAdvertising', {
       'serviceUuid': BleConstants.meshServiceUuid,
       'pubKeyBase64': base64.encode(pubKeyBytes),
       'localName':
           '${BleConstants.advertisementPrefix}${ephemeralUuid.substring(0, 8)}',
+      'manufacturerData': manufacturerData,
     });
+
 
     // Set up write handler from native side
     _channel.setMethodCallHandler(_handleNativeCall);

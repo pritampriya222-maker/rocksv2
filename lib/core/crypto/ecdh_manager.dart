@@ -47,14 +47,18 @@ class EcdhManager {
   // CONSTRUCTION
   // --------------------------------------------------------------------------
 
-  EcdhManager();
+  EcdhManager(this._currentKeyPair) {
+    _currentKeyPair!.extractPublicKey().then((pubKey) {
+      _currentPublicKeyBytes = Uint8List.fromList(pubKey.bytes);
+    });
+  }
 
-  /// Async factory: initialise with a fresh identity.
-  static Future<EcdhManager> create() async {
-    final mgr = EcdhManager();
-    await mgr.rotateIdentity();
+  /// Async factory: initialize with a PERSISTENT identity.
+  static Future<EcdhManager> create(KeyPair persistentKeyPair) async {
+    final mgr = EcdhManager(persistentKeyPair as SimpleKeyPair);
     return mgr;
   }
+
 
   // --------------------------------------------------------------------------
   // IDENTITY ROTATION
@@ -65,14 +69,10 @@ class EcdhManager {
   /// Must be called at least once before any other method.
   /// Automatically called by [KeyRotationManager.start()].
   Future<void> rotateIdentity() async {
-    _ensureNotDisposed();
-    await _zeroizeCurrentKeypair();
-
-    _currentKeyPair = await _x25519.newKeyPair();
-
-    final pubKey = await _currentKeyPair!.extractPublicKey();
-    _currentPublicKeyBytes = Uint8List.fromList(pubKey.bytes);
+    // Rotation disabled for Persistent Identity stability.
+    // In a Wi-Fi mesh, we rely on the Long-Term Identity.
   }
+
 
   /// Return a **defensive copy** of the current ephemeral public key bytes
   /// suitable for embedding in a BLE GATT characteristic.

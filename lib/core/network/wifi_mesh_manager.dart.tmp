@@ -1,0 +1,44 @@
+  void _handleDiscoveredPeer({
+    required String id,
+    required String ip,
+    required Uint8List pubKey,
+  }) async {
+    if (id == _nodeId) return;
+
+    if (_peers.containsKey(id)) {
+      // Update existing: Only update timestamp and IP
+      final existing = _peers[id]!;
+      _peers[id] = EphemeralPeer(
+        deviceUuid: id,
+        ecdhPublicKey: pubKey,
+        rssi: 0,
+        ipAddress: ip,
+        discoveredAt: DateTime.now(),
+        sessionKey: existing.sessionKey,
+      );
+    } else {
+      // Deduplicate by IP to handle IP changes/collisions
+      _peers.removeWhere((_, p) => p.ipAddress == ip);
+
+      // Perform Key Exchange
+      final sessionKey = await _ecdhManager.deriveSessionKey(
+        remotePublicKeyBytes: pubKey,
+      );
+
+      _peers[id] = EphemeralPeer(
+        deviceUuid: id,
+        ecdhPublicKey: pubKey,
+        rssi: 0,
+        ipAddress: ip,
+        discoveredAt: DateTime.now(),
+        sessionKey: Uint8List.fromList(await sessionKey.extractBytes()),
+      );
+      print('[WifiMesh] Discovered new peer: $id at $ip');
+    }
+    
+    // Ghost cleanup
+    final now = DateTime.now();
+    _peers.removeWhere((_, p) => now.difference(p.discoveredAt).inSeconds > 15);
+
+    _peerController.add(_peers.values.toList());
+  }

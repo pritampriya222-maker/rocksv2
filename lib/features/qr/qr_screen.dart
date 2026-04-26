@@ -7,7 +7,11 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../../core/app_theme.dart';
 import '../../core/models/message_fragment.dart';
 import '../../providers/crypto_providers.dart';
-import '../../providers/ble_providers.dart';
+import '../../providers/network_providers.dart';
+import '../../providers/messaging_providers.dart';
+import '../../providers/qr_providers.dart';
+
+
 
 /// QR Relay screen — two modes:
 ///
@@ -119,9 +123,9 @@ class _GenerateTabState extends ConsumerState<_GenerateTab> {
         // For the demo: we generate the session key from the local identity
         // In production: show a key QR separately
         throw Exception(
-          'Connect to at least one peer via BLE first.\n'
-          'Their public key is needed for ECDH encryption.',
+          'At least one peer must be in your Wi-Fi Mesh to exchange keys.',
         );
+
       }
 
       final activePeer = peers.firstWhere(
@@ -150,6 +154,7 @@ class _GenerateTabState extends ConsumerState<_GenerateTab> {
       if (mounted) setState(() => _generating = false);
     }
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -205,7 +210,7 @@ class _GenerateTabState extends ConsumerState<_GenerateTab> {
 
 // -----------------------------------------------------------------------------
 
-class _FragmentQrViewer extends StatelessWidget {
+class _FragmentQrViewer extends ConsumerWidget {
   final List<MessageFragment> fragments;
   final int currentIndex;
   final ValueChanged<int> onIndexChanged;
@@ -217,9 +222,13 @@ class _FragmentQrViewer extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+
     final fragment = fragments[currentIndex];
-    final qrData = fragment.toJsonString();
+    final qrMgr = ref.watch(qrPayloadManagerProvider);
+    final qrData = qrMgr.encodeForQr(jsonDecode(fragment.toJsonString()) as Map<String, dynamic>);
+
+
 
     return Column(
       children: [
@@ -365,47 +374,67 @@ class _ScanTabState extends ConsumerState<_ScanTab> {
   }
 
   void _onDetect(BarcodeCapture capture) {
-    final barcode = capture.barcodes.firstOrNull;
-    if (barcode == null) return;
-    final raw = barcode.rawValue;
-    if (raw == null) return;
+    if (!_scannerActive) return;
 
-    try {
-      final fragment = MessageFragment.fromJsonString(raw);
+    for (final barcode in capture.barcodes) {
+      final raw = barcode.rawValue;
+      if (raw == null || raw.isEmpty) continue;
 
-      if (_scannedFragments.containsKey(fragment.index)) return;
-      _scannedFragments[fragment.index] = fragment;
+      try {
+        final qrMgr = ref.read(qrPayloadManagerProvider);
+        final map = qrMgr.decodeFromQr(raw);
+        final fragment = MessageFragment.fromJsonString(jsonEncode(map));
 
-      setState(() {
-        _lastStatus =
-            'SHARD ${fragment.index + 1}/3 CAPTURED  '
-            '(${_scannedFragments.length}/3 total)';
-      });
+        if (_scannedFragments.containsKey(fragment.index)) continue;
+        
+        setState(() {
+          _scannedFragments[fragment.index] = fragment;
+          _lastStatus =
+              'SHARD ${fragment.index + 1}/3 CAPTURED  '
+              '(${_scannedFragments.length}/3 total)';
+        });
 
-      if (_scannedFragments.length == 3) {
-        _relayAllFragments();
+
+
+        if (_scannedFragments.length == 3) {
+          _relayAllFragments();
+          break;
+        }
+      } catch (_) {
+        // Silently ignore invalid mesh fragments to prevent status spam
       }
-    } catch (_) {
-      setState(() => _lastStatus = 'INVALID QR — not a mesh fragment');
     }
   }
+
 
   Future<void> _relayAllFragments() async {
     setState(() {
       _scannerActive = false;
-      _lastStatus = 'ALL 3 SHARDS CAPTURED — relaying via BLE…';
+      _lastStatus = 'ALL 3 SHARDS CAPTURED — relaying via Wi-Fi Mesh…';
+
     });
 
-    final bleMgr = ref.read(bleManagerProvider);
     final sorted = [0, 1, 2].map((i) => _scannedFragments[i]!).toList();
 
+
     for (final fragment in sorted) {
-      await bleMgr.broadcastFragment(fragment);
+      // 1. Relay via Wi-Fi Mesh
+      await ref.read(wifiMeshManagerProvider).broadcastFragment(fragment);
+      
+      final peers = ref.read(connectedPeersProvider).valueOrNull ?? [];
+      final ecdh = ref.read(ecdhManagerProvider);
+      ref.read(messagingControllerProvider.notifier).onFragmentReceived(fragment, peers, ecdh);
+
+
+
+      
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
 
+
     if (mounted) {
-      setState(() => _lastStatus = '✓ ALL 3 FRAGMENTS RELAYED VIA BLE');
+      setState(() => _lastStatus = '✓ ALL 3 FRAGMENTS RELAYED VIA MESH');
+
       _scannedFragments.clear();
     }
   }

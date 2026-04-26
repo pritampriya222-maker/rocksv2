@@ -4,23 +4,51 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'features/ui/main_navigation_screen.dart';
+import 'providers/crypto_providers.dart';
+import 'core/crypto/crypto.dart';
+import 'core/security/identity_service.dart';
+import 'providers/network_providers.dart';
+
+
 
 Future<void> main() async {
   // 1. Ensure bindings are initialized before executing async configuration.
   WidgetsFlutterBinding.ensureInitialized();
   
   // 2. Synchronously initialize the local database for Public Alerts.
-  // This ensures the DatabaseService is ready the moment the UI paints.
   await Hive.initFlutter();
   await Hive.openBox<dynamic>('public_broadcasts'); 
 
+  // 3. Initialize Identity Service (Persistent ID)
+  final identity = IdentityService();
+  await identity.init();
+
+  // 4. Initialize the entire crypto stack (Using Persistent Identity)
+  final ecdh = await EcdhManager.create(identity.keyPair);
+  final keyRotation = KeyRotationManager(ecdh);
+  // Rotation is disabled in EcdhManager, but we keep the manager for cleanup logic.
+
+
+
+
+  final container = ProviderContainer(
+    overrides: [
+      ecdhManagerProvider.overrideWithValue(ecdh),
+      keyRotationProvider.overrideWithValue(keyRotation),
+      identityServiceProvider.overrideWithValue(identity),
+    ],
+
+  );
+
   runApp(
-    // 3. Wrap the root App in a ProviderScope for Riverpod state injection.
-    const ProviderScope(
-      child: OfflineMeshApp(),
+    // 4. Wrap the root App in an UncontrolledProviderScope.
+    UncontrolledProviderScope(
+      container: container,
+      child: const OfflineMeshApp(),
     ),
   );
 }
+
 
 class OfflineMeshApp extends StatelessWidget {
   const OfflineMeshApp({super.key});
@@ -72,21 +100,30 @@ class _InitializationScreenState extends State<InitializationScreen> {
 
   Future<void> _requestPermissions() async {
     try {
+      if (Platform.isWindows) {
+        // Windows doesn't require runtime permission prompts for Wi-Fi sockets.
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute<void>(builder: (_) => const MainNavigationScreen()),
+          );
+        }
+        return;
+      }
+
       Map<Permission, PermissionStatus> statuses;
 
       if (Platform.isAndroid) {
-        // Android 12+ requires specific Bluetooth permissions
+
+        // Wi-Fi Mesh requires Location and Nearby Wifi (Android 13+)
         statuses = await [
-          Permission.bluetoothScan,
-          Permission.bluetoothAdvertise,
-          Permission.bluetoothConnect,
-          Permission.location, // Required for BLE scanning on Android
+          Permission.location,
+          Permission.nearbyWifiDevices,
           Permission.camera,   // Required for QR fallback
         ].request();
       } else {
         // iOS permissions
         statuses = await [
-          Permission.bluetooth,
           Permission.camera,
         ].request();
       }
@@ -112,9 +149,10 @@ class _InitializationScreenState extends State<InitializationScreen> {
         setState(() {
           _isLoading = false;
           _hasError = true;
-          _statusMessage = 'CRITICAL ERROR: Core permissions denied.\n\nOffline Mesh requires Bluetooth and Camera access to function in a blackout scenario. Please enable them in system settings.';
+          _statusMessage = 'CRITICAL ERROR: Core permissions denied.\n\nOffline Mesh requires Wi-Fi and Camera access to function in a blackout scenario. Please enable them in system settings.';
         });
       }
+
     } catch (e) {
       setState(() {
         _isLoading = false;

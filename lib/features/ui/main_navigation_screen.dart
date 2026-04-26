@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'home_screen.dart';
 import 'public_broadcast_screen.dart';
+import 'peer_list_screen.dart';
+import '../../providers/network_providers.dart';
+import '../../core/security/anti_forensics_service.dart';
 
-/// The primary shell of the application managing routing between operational modes.
 class MainNavigationScreen extends ConsumerStatefulWidget {
   const MainNavigationScreen({super.key});
 
@@ -11,41 +13,57 @@ class MainNavigationScreen extends ConsumerStatefulWidget {
   ConsumerState<MainNavigationScreen> createState() => _MainNavigationScreenState();
 }
 
-class _MainNavigationScreenState extends ConsumerState<MainNavigationScreen> {
-  int _currentIndex = 0;
-
-  // The two distinct operational modes
+class _MainNavigationScreenState extends ConsumerState<MainNavigationScreen> with WidgetsBindingObserver {
   final List<Widget> _screens = const [
     HomeScreen(),
+    PeerListScreen(),
     PublicBroadcastScreen(),
   ];
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Re-trigger mesh discovery when app comes to foreground
+      ref.read(wifiMeshManagerProvider).refresh();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // Watch the global peer count to reassure the user that the mesh is active.
-    final peerCount = ref.watch(peerCountProvider);
+    ref.watch(webPortalProvider); // Initialize the portal bridge
+    final currentIndex = ref.watch(navigationIndexProvider);
+
+    final peerCount = ref.watch(connectedPeersProvider).valueOrNull?.length ?? 0;
 
     return Scaffold(
-      // We use a global AppBar here to display connectivity status persistently.
-      // Note: If HomeScreen has its own AppBar, you would typically remove it
-      // to avoid double AppBars, but nested Scaffolds are supported in Flutter.
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('Offline Mesh', style: TextStyle(fontWeight: FontWeight.bold)),
             Text(
-              peerCount > 0 ? 'BLE Active: $peerCount Peers' : 'BLE Disconnected',
+              peerCount > 0 ? 'Mesh Active: $peerCount Peers' : 'Scanning Mesh...',
               style: TextStyle(
                 fontSize: 12,
-                color: peerCount > 0 ? Colors.greenAccent : Colors.redAccent,
+                color: peerCount > 0 ? Colors.greenAccent : Colors.grey,
               ),
             ),
           ],
         ),
         actions: [
-          // If we are on the Secure Direct tab, show the Wipe Memory button
-          if (_currentIndex == 0)
+          if (currentIndex == 0)
             IconButton(
               icon: const Icon(Icons.delete_forever, color: Colors.redAccent),
               tooltip: 'Wipe Memory & Exit',
@@ -54,12 +72,12 @@ class _MainNavigationScreenState extends ConsumerState<MainNavigationScreen> {
         ],
       ),
       body: IndexedStack(
-        index: _currentIndex,
+        index: currentIndex,
         children: _screens,
       ),
       bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentIndex,
-        onTap: (index) => setState(() => _currentIndex = index),
+        currentIndex: currentIndex,
+        onTap: (index) => ref.read(navigationIndexProvider.notifier).state = index,
         backgroundColor: const Color(0xFF1E1E1E),
         selectedItemColor: Colors.blueAccent,
         unselectedItemColor: Colors.grey,
@@ -67,6 +85,10 @@ class _MainNavigationScreenState extends ConsumerState<MainNavigationScreen> {
           BottomNavigationBarItem(
             icon: Icon(Icons.lock),
             label: 'Secure Direct',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.hub),
+            label: 'Peers',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.campaign),
@@ -83,7 +105,7 @@ class _MainNavigationScreenState extends ConsumerState<MainNavigationScreen> {
       builder: (ctx) => AlertDialog(
         title: const Text('WIPE SECURE MEMORY?'),
         content: const Text(
-          'This will permanently zero-out all cryptographic keys and RAM buffers, then exit the app. This cannot be undone.',
+          'This will permanently zero-out all cryptographic keys and RAM buffers, then exit the app.',
         ),
         actions: [
           TextButton(
@@ -91,11 +113,7 @@ class _MainNavigationScreenState extends ConsumerState<MainNavigationScreen> {
             child: const Text('CANCEL'),
           ),
           TextButton(
-            onPressed: () {
-              // Call SessionLifecycleManager.teardown()
-              // Clear Riverpod state
-              // Exit App
-            },
+            onPressed: () => ref.read(antiForensicsProvider).nuclearWipe(),
             child: const Text('WIPE & EXIT', style: TextStyle(color: Colors.redAccent)),
           ),
         ],

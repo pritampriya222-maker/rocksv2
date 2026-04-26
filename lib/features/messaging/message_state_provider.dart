@@ -3,41 +3,53 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cryptography/cryptography.dart';
 import '../../core/models/message_fragment.dart';
-import '../../core/crypto/aes_cipher.dart';
+import '../../core/models/ephemeral_peer.dart';
+import '../../core/crypto/crypto.dart';
+import '../../core/network/wifi_mesh_manager.dart';
+
+
 import 'fragmentation_engine.dart';
+import 'dart:typed_data';
+
 
 /// Represents a successfully reassembled and decrypted message for the UI.
 class DisplayMessage {
   final String id;
   final String text;
   final DateTime receivedAt;
+  final bool isMe;
+  final String? peerId; // Null for group chat, or the ID of the specific peer
+  final bool isGroup;
 
-  DisplayMessage({required this.id, required this.text, required this.receivedAt});
+  DisplayMessage({
+    required this.id,
+    required this.text,
+    required this.receivedAt,
+    this.isMe = false,
+    this.peerId,
+    this.isGroup = true,
+  });
 }
+
 
 /// Riverpod StateNotifier to track incoming fragments and trigger reassembly.
 class MessageStateNotifier extends StateNotifier<List<DisplayMessage>> {
   final AesCipher _aesCipher;
   final FragmentationEngine _fragmentationEngine;
   
-  // Dependency to fetch the current active session key for decryption.
-  final Future<SecretKey> Function() _getSessionKey;
-
-  /// Private RAM buffer: Key is Message ID (fragmentSetId), inner map tracks sequence index (0, 1, 2).
   final Map<String, Map<int, MessageFragment>> _incomingBuffers = {};
-  
   Timer? _cleanupTimer;
 
+  
   MessageStateNotifier({
     required AesCipher aesCipher,
     required FragmentationEngine fragmentationEngine,
-    required Future<SecretKey> Function() getSessionKey,
   })  : _aesCipher = aesCipher,
         _fragmentationEngine = fragmentationEngine,
-        _getSessionKey = getSessionKey,
         super([]) {
     _scheduleCleanup();
   }
+
 
   @override
   void dispose() {
@@ -66,7 +78,7 @@ class MessageStateNotifier extends StateNotifier<List<DisplayMessage>> {
 
   /// Processes an incoming encrypted fragment, buffering it in RAM.
   /// Reassembles the full message immediately when all 3 fragments (LEN == 3) arrive.
-  Future<void> onFragmentReceived(MessageFragment fragment) async {
+  Future<void> onFragmentReceived(MessageFragment fragment, List<EphemeralPeer> peers, EcdhManager ecdh) async {
     // 1. Drop expired fragments immediately
     if (fragment.isExpired) return;
 
@@ -80,58 +92,125 @@ class MessageStateNotifier extends StateNotifier<List<DisplayMessage>> {
 
     // 4. Check if we have all 3 pieces for this message ID
     if (_incomingBuffers[msgId]!.length == 3) {
-      await _reassembleAndDecrypt(msgId);
+      await _reassembleAndDecrypt(msgId, peers, ecdh);
     }
   }
+
 
   /// Decrypts the 3 fragments and reassembles them using the FragmentationEngine.
-  Future<void> _reassembleAndDecrypt(String msgId) async {
-    // Extract the complete set of 3 fragments
+  Future<void> _reassembleAndDecrypt(String msgId, List<EphemeralPeer> peers, EcdhManager ecdh) async {
     final fragments = _incomingBuffers[msgId]!;
-    
-    // CRITICAL: Immediately remove the message ID from buffer to free RAM
     _incomingBuffers.remove(msgId);
 
-    try {
-      final sessionKey = await _getSessionKey();
-      final plaintextChunks = <int, String>{};
+    // Try EVERY peer to see who sent this message
+    for (final peer in peers) {
+      try {
+        if (!peer.isKeyExchangeComplete) continue;
 
-      // 1. Pass the 3 fragments to AesCipher for decryption
-      for (var i = 0; i < 3; i++) {
-        final f = fragments[i]!;
-        
-        // Reconstruct the SecretBox from the raw wireBytes
-        final secretBox = _aesCipher.bytesToSecretBox(f.wireBytes);
-        
-        // Attempt decryption (will fail gracefully if we are a blind relay)
-        final decryptedBytes = await _aesCipher.decryptFragment(
-           secretBox: secretBox,
-           sessionKey: sessionKey,
-           sequenceNumber: f.index, // Sequence validation via AAD
+        final sessionKey = await ecdh.deriveSessionKey(
+          remotePublicKeyBytes: peer.ecdhPublicKey,
         );
-        
-        if (decryptedBytes == null) {
-          throw Exception('Decryption failed for chunk index $i');
+
+        final plaintextChunks = <int, String>{};
+
+        for (var i = 0; i < 3; i++) {
+          final f = fragments[i]!;
+          final secretBox = _aesCipher.bytesToSecretBox(f.wireBytes);
+          final decryptedBytes = await _aesCipher.decryptFragment(
+            secretBox: secretBox,
+            sessionKey: sessionKey,
+            sequenceNumber: f.index,
+          );
+          
+          if (decryptedBytes == null) throw Exception('No match');
+          plaintextChunks[i] = utf8.decode(decryptedBytes);
         }
-        
-        plaintextChunks[i] = utf8.decode(decryptedBytes);
+
+        // IF WE REACH HERE, Decryption succeeded with this peer's key!
+        final fullMessage = _fragmentationEngine.reassembleMessage(plaintextChunks);
+
+        state = [
+          ...state,
+          DisplayMessage(
+            id: msgId,
+            text: fullMessage,
+            receivedAt: DateTime.now(),
+            isMe: false,
+            peerId: peer.deviceUuid,
+            isGroup: fragments.values.first.isGroup,
+          )
+        ];
+
+        return; // Success! Stop trying other peers.
+      } catch (_) {
+        continue; // Try next peer
       }
-
-      // 2. Reassemble via FragmentationEngine
-      final fullMessage = _fragmentationEngine.reassembleMessage(plaintextChunks);
-
-      // 3. Add the final assembled message to Riverpod state to trigger UI updates
-      state = [
-        ...state,
-        DisplayMessage(
-          id: msgId,
-          text: fullMessage,
-          receivedAt: DateTime.now(),
-        )
-      ];
-    } catch (e) {
-      // If decryption fails (e.g. we don't have the key), this node is just a relay.
-      // We silently drop the error as the transport layer handles broadcasting separately.
     }
   }
+
+
+  /// Sends a plaintext message by fragmenting and broadcasting it.
+  /// (This fix addresses the "no effect" issue for the sender and recipient)
+  Future<void> sendMessage({
+    required String text,
+    required WifiMeshManager wifiManager,
+    required EcdhManager ecdh,
+    required FragmentService fragmentService,
+    required List<EphemeralPeer> peers,
+    bool isGroup = true,
+  }) async {
+    if (peers.isEmpty) return;
+    
+    String? fragmentSetId;
+    String? lastPeerId;
+
+    for (final peer in peers) {
+      try {
+        if (!peer.isKeyExchangeComplete) continue;
+
+        lastPeerId = peer.deviceUuid;
+
+        // 1. Derive unique session key for THIS peer
+        final sessionKey = await ecdh.deriveSessionKey(
+          remotePublicKeyBytes: peer.ecdhPublicKey,
+        );
+
+        // 2. Create encrypted fragments specifically for THIS peer
+        final plaintextBytes = Uint8List.fromList(utf8.encode(text));
+        final fragments = await fragmentService.createFragments(
+          plaintext: plaintextBytes,
+          sessionKey: sessionKey,
+          isGroup: isGroup,
+        );
+
+        
+        fragmentSetId ??= fragments.first.fragmentSetId;
+
+        // 3. Send to mesh
+        for (final fragment in fragments) {
+          await wifiManager.broadcastFragment(fragment);
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+      } catch (e) {
+        print('[Messaging] Failed to send to peer ${peer.ipAddress}: $e');
+      }
+    }
+
+    // 4. Add to local state
+    state = [
+      ...state,
+      DisplayMessage(
+        id: fragmentSetId ?? DateTime.now().toString(),
+        text: text,
+        receivedAt: DateTime.now(),
+        isMe: true,
+        isGroup: isGroup,
+        peerId: isGroup ? null : lastPeerId,
+      )
+    ];
+  }
+
+
 }
+
+

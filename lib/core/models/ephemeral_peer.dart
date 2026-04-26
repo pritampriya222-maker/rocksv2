@@ -1,48 +1,53 @@
 import 'dart:typed_data';
 
-/// Represents a discovered BLE peer during a session.
-/// Ephemeral — destroyed when session ends or UUID rotates.
+/// Represents a discovered mesh peer during a session.
+/// Ephemeral — destroyed when session ends or wiped.
 class EphemeralPeer {
-  /// Random UUID advertised by peer (rotates every 30 seconds)
   final String deviceUuid;
-
-  /// Peer's ephemeral X25519 public key (from BLE advertisement)
   final Uint8List ecdhPublicKey;
-
-  /// Derived shared session key (ECDH output) — never persisted
-  Uint8List? sessionKey;
-
-  /// BLE signal strength — used for proximity estimation
+  final Uint8List? sessionKey;
   final int rssi;
-
-  /// When this peer was discovered
+  final String? ipAddress;
   final DateTime discoveredAt;
 
-  /// Peer is trusted if ECDH key exchange succeeded
-  bool get isKeyExchangeComplete => sessionKey != null;
-
-  /// Peer expires when UUID rotates (30 seconds)
-  bool get isStale =>
-      DateTime.now().difference(discoveredAt).inSeconds > 30;
+  bool get isKeyExchangeComplete => sessionKey != null && sessionKey!.isNotEmpty;
 
   EphemeralPeer({
     required this.deviceUuid,
     required this.ecdhPublicKey,
     required this.rssi,
     required this.discoveredAt,
+    this.ipAddress,
     this.sessionKey,
   });
 
-  /// Zero out session key from memory before garbage collection
+  EphemeralPeer copyWith({
+    String? deviceUuid,
+    Uint8List? ecdhPublicKey,
+    Uint8List? sessionKey,
+    int? rssi,
+    String? ipAddress,
+    DateTime? discoveredAt,
+  }) {
+    return EphemeralPeer(
+      deviceUuid: deviceUuid ?? this.deviceUuid,
+      ecdhPublicKey: ecdhPublicKey ?? this.ecdhPublicKey,
+      sessionKey: sessionKey ?? this.sessionKey,
+      rssi: rssi ?? this.rssi,
+      ipAddress: ipAddress ?? this.ipAddress,
+      discoveredAt: discoveredAt ?? this.discoveredAt,
+    );
+  }
+
+  /// Zero out session key from memory (best effort)
   void destroy() {
     if (sessionKey != null) {
       for (int i = 0; i < sessionKey!.length; i++) {
         sessionKey![i] = 0;
       }
-      sessionKey = null;
     }
   }
 
   @override
-  String toString() => 'Peer[$deviceUuid RSSI:$rssi]';
+  String toString() => 'Peer[$deviceUuid IP:$ipAddress]';
 }

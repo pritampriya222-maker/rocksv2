@@ -7,6 +7,12 @@ import '../crypto/crypto.dart';
 import '../models/ephemeral_peer.dart';
 import '../models/message_fragment.dart';
 import 'ble_constants.dart';
+import 'ble_peripheral_bridge.dart';
+
+const int _meshManufacturerId = 0xFFFF; // Custom mesh protocol ID
+final Uint8List _meshMarker = Uint8List.fromList([0x4F, 0x4D]); // 'OM'
+
+
 
 /// Manages the complete BLE lifecycle for the Offline Mesh:
 ///
@@ -29,6 +35,8 @@ import 'ble_constants.dart';
 /// - [_seenFragmentIds] is a bounded LRU-like set used for dedup.
 class BleManager {
   final EcdhManager _ecdhManager;
+  final BlePeripheralBridge _bridge;
+
 
   // --------------------------------------------------------------------------
   // Internal state (all RAM-only)
@@ -36,6 +44,7 @@ class BleManager {
 
   /// Currently connected peers: deviceId → EphemeralPeer
   final Map<String, EphemeralPeer> _connectedPeers = {};
+  final Set<String> _connectingPeers = {}; // Track devices currently in handshake
 
   /// Seen fragment IDs for flood-relay deduplication (bounded)
   final Set<String> _seenFragmentIds = {};
@@ -63,8 +72,10 @@ class BleManager {
 
   BleManager({
     required EcdhManager ecdhManager,
-    required FragmentService fragmentService,
-  })  : _ecdhManager = ecdhManager;
+    required BlePeripheralBridge bridge,
+  })  : _ecdhManager = ecdhManager,
+        _bridge = bridge;
+
 
   // --------------------------------------------------------------------------
   // PUBLIC STREAMS
@@ -72,6 +83,14 @@ class BleManager {
 
   /// Emits fragments that this device successfully decrypted.
   Stream<MessageFragment> get inboundFragments => _inboundController.stream;
+
+  /// Manually inject a fragment into the inbound stream (e.g. from QR scan).
+  void addInboundFragment(MessageFragment fragment) {
+    if (!_inboundController.isClosed) {
+      _inboundController.add(fragment);
+    }
+  }
+
 
   /// Emits the current peer list whenever it changes.
   Stream<List<EphemeralPeer>> get peerUpdates => _peersController.stream;
@@ -109,17 +128,54 @@ class BleManager {
     if (_isScanning || _disposed) return;
     _isScanning = true;
 
-    await FlutterBluePlus.startScan(
-      withServices: [Guid(BleConstants.meshServiceUuid)],
-      timeout: const Duration(milliseconds: BleConstants.scanTimeoutMs),
-      continuousUpdates: true,
-    );
+    print('[BleManager] Starting mesh scan...');
 
-    _scanSubscription = FlutterBluePlus.scanResults.listen(
-      _onScanResults,
-      onError: (_) {},
-    );
+    _scanSubscription = FlutterBluePlus.onScanResults.listen((results) {
+      for (ScanResult result in results) {
+        final deviceId = result.device.remoteId.str;
+        
+        if (_connectedPeers.containsKey(deviceId)) continue;
+        if (_connectingPeers.contains(deviceId)) continue;
+
+        final advData = result.advertisementData;
+        final advName = advData.advName;
+        final platformName = result.device.platformName;
+        
+        // 1. Check Service UUID
+        final bool hasService = advData.serviceUuids.contains(Guid(BleConstants.meshServiceUuid));
+        
+        // 2. Check Local Name Prefix (OM_)
+        final bool hasNamePrefix = advName.startsWith(BleConstants.advertisementPrefix) || 
+                                 platformName.startsWith(BleConstants.advertisementPrefix);
+                                 
+        // 3. Check Manufacturer Data (Most reliable on some Androids)
+        bool hasMeshMarker = false;
+        final mData = advData.manufacturerData[_meshManufacturerId];
+        if (mData != null && mData.length >= 2) {
+          if (mData[0] == _meshMarker[0] && mData[1] == _meshMarker[1]) {
+            hasMeshMarker = true;
+          }
+        }
+
+        if (hasService || hasNamePrefix || hasMeshMarker) {
+          print('[BleManager] Found Peer! ID: $deviceId, Name: $advName, Service: $hasService, Marker: $hasMeshMarker');
+          _connectAndExchangeKeys(result.device, result.rssi).ignore();
+        }
+      }
+    }, onError: (e) => print('[BleManager] Scan error: $e'));
+
+    try {
+      await FlutterBluePlus.startScan(
+        continuousUpdates: true,
+        androidUsesFineLocation: true,
+      );
+
+    } catch (e) {
+      print('[BleManager] Scan failed: $e');
+      _isScanning = false;
+    }
   }
+
 
   /// Stop scanning.
   Future<void> stopScanning() async {
@@ -127,22 +183,6 @@ class BleManager {
     await _scanSubscription?.cancel();
     _scanSubscription = null;
     await FlutterBluePlus.stopScan();
-  }
-
-  void _onScanResults(List<ScanResult> results) {
-    for (final result in results) {
-      final deviceId = result.device.remoteId.str;
-
-      // Skip if already connected
-      if (_connectedPeers.containsKey(deviceId)) continue;
-
-      // Extract advertised local name
-      final localName = result.advertisementData.advName;
-      if (!localName.startsWith(BleConstants.advertisementPrefix)) continue;
-
-      // Async connect without blocking scan loop
-      _connectAndExchangeKeys(result.device, result.rssi).ignore();
-    }
   }
 
   // --------------------------------------------------------------------------
@@ -155,6 +195,10 @@ class BleManager {
   ) async {
     if (_disposed) return;
     if (_connectedPeers.length >= BleConstants.maxConcurrentConnections) return;
+    
+    final deviceId = device.remoteId.str;
+    if (_connectingPeers.contains(deviceId)) return;
+    _connectingPeers.add(deviceId);
 
     try {
       await device.connect(
@@ -227,10 +271,12 @@ class BleManager {
         }
       });
     } catch (_) {
-      // Connection or key exchange failed — clean up silently
       _onPeerDisconnected(device.remoteId.str);
+    } finally {
+      _connectingPeers.remove(deviceId);
     }
   }
+
 
   // --------------------------------------------------------------------------
   // PERIPHERAL / ADVERTISING
@@ -246,20 +292,26 @@ class BleManager {
   /// so connecting peers can perform ECDH without additional handshake RTTs.
   Future<void> startAdvertising(Uint8List pubKeyBytes) async {
     if (_isAdvertising || _disposed) return;
-
-    // NOTE: flutter_blue_plus >=1.28 does not expose peripheral/advertising
-    // APIs directly in Dart. On Android, we use a MethodChannel to the
-    // native BluetoothLeAdvertiser. On iOS, CBPeripheralManager is needed.
-    //
-    // For the MVP / hackathon, we use the platform channel stub below.
-    // Full peripheral implementation is in:
-    //   android/app/src/main/kotlin/.../BlePeripheralChannel.kt
-    //   ios/Runner/BlePeripheralChannel.swift
-    //
-    // See `BlePeripheralBridge` class in this directory.
     _isAdvertising = true;
-    // TODO (Prompt 5 native bridge): call platform channel
+
+    final ephemeralUuid = DateTime.now().millisecondsSinceEpoch.toString();
+    print('[BleManager] Start Adv: ${BleConstants.advertisementPrefix}${ephemeralUuid.substring(0, 8)}');
+    
+    await _bridge.startAdvertising(
+      pubKeyBytes: pubKeyBytes,
+      ephemeralUuid: ephemeralUuid,
+      manufacturerData: _meshMarker,
+    );
+
+
+
+    // Listen for incoming fragments from centrals
+    _bridge.onFragmentWritten = (Uint8List bytes) {
+      _onNativePacketReceived(bytes);
+    };
+
   }
+
 
   /// Update the advertised public key (called on each identity rotation).
   Future<void> updateAdvertisedPubKey(Uint8List newPubKeyBytes) async {
@@ -270,8 +322,9 @@ class BleManager {
   /// Stop advertising.
   Future<void> stopAdvertising() async {
     _isAdvertising = false;
-    // TODO (Prompt 5 native bridge): call platform channel
+    await _bridge.stopAdvertising();
   }
+
 
   // --------------------------------------------------------------------------
   // FRAGMENT DISPATCH
@@ -290,8 +343,9 @@ class BleManager {
     final wireBytes = packet.toBytes();
 
     for (final peer in _connectedPeers.values) {
-      _sendToPeer(peer, wireBytes).ignore();
+      _sendBytesToPeer(peer.deviceUuid, wireBytes).ignore();
     }
+
   }
 
   /// Send a fragment to a specific peer only.
@@ -306,12 +360,26 @@ class BleManager {
         utf8.encode(fragment.withIncrementedHop().toJsonString()),
       ),
     );
-    await _sendToPeer(peer, packet.toBytes());
+    await _sendBytesToPeer(peer.deviceUuid, packet.toBytes());
+
   }
 
-  Future<void> _sendToPeer(EphemeralPeer peer, Uint8List bytes) async {
+  /// Broadcast a public packet (non-encrypted) to all connected peers.
+  Future<void> broadcastPublicPacket(List<int> packet) async {
+    if (_disposed) return;
+    
+    // 1. Send to all peers we connected to (Centrals we are client of)
+    for (final peer in _connectedPeers.values) {
+      _sendBytesToPeer(peer.deviceUuid, Uint8List.fromList(packet)).ignore();
+    }
+    
+    // 2. Notify all centrals connected to US (We are peripheral/server)
+    await _bridge.notifyFragment(Uint8List.fromList(packet));
+  }
+
+  Future<void> _sendBytesToPeer(String deviceId, Uint8List bytes) async {
     try {
-      final device = BluetoothDevice.fromId(peer.deviceUuid);
+      final device = BluetoothDevice.fromId(deviceId);
       final services = await device.discoverServices();
       final meshService = services.firstWhere(
         (s) => s.serviceUuid == Guid(BleConstants.meshServiceUuid),
@@ -329,11 +397,27 @@ class BleManager {
     }
   }
 
+  void _onNativePacketReceived(Uint8List bytes) {
+    // Determine packet type
+    if (bytes.isEmpty) return;
+    
+    // For now, assume it's either a fragment or a public packet
+    // The BlePacket class handles fragmentation
+    final packet = BlePacket.fromBytes(bytes);
+    if (packet == null) return;
+    
+    if (packet.type == BlePacket.typeFragment) {
+      _onFragmentReceived(bytes, fromPeer: null);
+    }
+  }
+
+
+
   // --------------------------------------------------------------------------
   // FRAGMENT RECEPTION & RELAY
   // --------------------------------------------------------------------------
 
-  void _onFragmentReceived(Uint8List bytes, {required EphemeralPeer fromPeer}) {
+  void _onFragmentReceived(Uint8List bytes, {EphemeralPeer? fromPeer}) {
     final packet = BlePacket.fromBytes(bytes);
     if (packet == null || packet.type != BlePacket.typeFragment) return;
 
@@ -363,13 +447,14 @@ class BleManager {
     _inboundController.add(fragment);
 
     // Blind relay: forward to all peers EXCEPT the sender, after random jitter
-    _relayFragmentWithJitter(fragment, excludePeer: fromPeer.deviceUuid);
+    _relayFragmentWithJitter(fragment, excludePeer: fromPeer?.deviceUuid);
   }
 
   void _relayFragmentWithJitter(
     MessageFragment fragment, {
-    required String excludePeer,
+    String? excludePeer,
   }) {
+
     final jitterMs = BleConstants.minRelayDelayMs +
         _random.nextInt(
           BleConstants.maxRelayDelayMs - BleConstants.minRelayDelayMs,
@@ -388,9 +473,13 @@ class BleManager {
 
       for (final entry in _connectedPeers.entries) {
         if (entry.key == excludePeer) continue;
-        _sendToPeer(entry.value, wireBytes).ignore();
+        _sendBytesToPeer(entry.key, wireBytes).ignore();
       }
+      
+      // Also notify centrals connected to US
+      _bridge.notifyFragment(wireBytes).ignore();
     });
+
   }
 
   // --------------------------------------------------------------------------

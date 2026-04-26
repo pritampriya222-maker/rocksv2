@@ -21,12 +21,13 @@ final blePeripheralBridgeProvider = Provider<BlePeripheralBridge>((ref) {
 /// Depends on [ecdhManagerProvider] and [fragmentServiceProvider].
 final bleManagerProvider = Provider<BleManager>((ref) {
   final ecdh = ref.watch(ecdhManagerProvider);
-  final fragments = ref.watch(fragmentServiceProvider);
+  final bridge = ref.watch(blePeripheralBridgeProvider);
 
   final mgr = BleManager(
     ecdhManager: ecdh,
-    fragmentService: fragments,
+    bridge: bridge,
   );
+
 
   ref.onDispose(() => mgr.dispose());
   return mgr;

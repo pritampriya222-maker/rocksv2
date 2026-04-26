@@ -1,0 +1,30 @@
+  /// Send fragment specifically to a set of IPs with aggressive retries
+  Future<void> relayToPeers(MessageFragment fragment, List<String> ips) async {
+    final bytes = fragment.toWireBytes();
+    for (var ip in ips) {
+      bool success = false;
+      int retries = 0;
+      
+      while (!success && retries < 3) {
+        try {
+          final socket = await Socket.connect(ip, tcpPort,
+              timeout: const Duration(seconds: 1));
+          socket.add(bytes);
+          await socket.flush();
+          await socket.close();
+          success = true;
+          print('[WifiMesh] Fragment delivered to $ip');
+        } catch (e) {
+          retries++;
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+      }
+    }
+  }
+
+  Future<void> refresh() async {
+    print('[WifiMesh] App Resumed: Refreshing sockets...');
+    await stop();
+    await start();
+  }
+}
