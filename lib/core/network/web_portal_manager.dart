@@ -22,8 +22,9 @@ class WebPortalManager {
         .add(_handleHttpRequest)
         .handler;
 
-    _server = await io.serve(handler, InternetAddress.anyIPv4, 8080);
-    print('[WebPortal] Listening on http://${_server!.address.address}:8080');
+    _server = await io.serve(handler, InternetAddress.anyIPv4, 9000);
+    print('[WebPortal] Listening on http://${_server!.address.address}:9000');
+
 
     // Bridge Mesh -> Web
     _meshManager.fragmentStream.listen(_onMeshFragment);

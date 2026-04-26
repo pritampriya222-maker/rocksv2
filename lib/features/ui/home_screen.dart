@@ -205,7 +205,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             style: TextStyle(color: Colors.white70, fontSize: 11)),
           SizedBox(height: 4),
           SelectableText(
-            'http://192.168.43.1:8080',
+            'http://192.168.43.1:9000',
             style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16, fontFamily: 'monospace'),
           ),
           SizedBox(height: 4),
