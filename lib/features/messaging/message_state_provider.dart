@@ -145,7 +145,9 @@ class MessageStateNotifier extends StateNotifier<List<DisplayMessage>> {
         fragmentSetId ??= fragments.first.fragmentSetId;
         for (final fragment in fragments) {
           await wifiManager.broadcastFragment(fragment);
-          await Future<void>.delayed(const Duration(milliseconds: 10));
+          // Increased delay to 100ms to allow the receiver's OS TCP stack to 
+          // accept, process, and close the socket before the next fragment hits.
+          await Future<void>.delayed(const Duration(milliseconds: 100));
         }
       } catch (e) {
         print('[Messaging] Failed to send to peer ${peer.ipAddress}: $e');

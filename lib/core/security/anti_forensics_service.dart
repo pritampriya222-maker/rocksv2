@@ -68,5 +68,5 @@ class AntiForensicsService {
 final antiForensicsProvider = Provider<AntiForensicsService>((ref) {
   // Note: We'll pass a Ref here but we need a WidgetRef usually for providers
   // Actually, we can use ProviderRef.
-  return AntiForensicsService(ref as dynamic); 
+  return AntiForensicsService(ref); 
 });

@@ -11,9 +11,9 @@ class AlertNotifier extends StateNotifier<List<PublicAlert>> {
   }
 
   void _loadFromDisk() {
-    final List<dynamic>? raw = _box.get('alerts');
+    final raw = _box.get('alerts') as List<dynamic>?;
     if (raw != null) {
-      state = raw.map((json) => PublicAlert.fromJson(Map<String, dynamic>.from(json))).toList();
+      state = raw.map((json) => PublicAlert.fromJson(Map<String, dynamic>.from(json as Map))).toList();
     }
   }
 
@@ -62,12 +62,24 @@ class AlertNotifier extends StateNotifier<List<PublicAlert>> {
 final alertProvider = StateNotifierProvider<AlertNotifier, List<PublicAlert>>((ref) {
   final notifier = AlertNotifier();
 
+  // 1. Listen for INCOMING alerts from mesh and merge
   ref.listen(incomingAlertsProvider, (previous, next) {
     if (next.hasValue) {
       notifier.syncFromPeer(next.value!);
     }
   });
 
+  // 2. Listen for STATE changes (new local alerts) and PUSH immediately
+  ref.listenSelf((previous, next) {
+    final peers = ref.read(connectedPeersProvider).valueOrNull;
+    if (peers != null && peers.isNotEmpty && next.isNotEmpty) {
+      final manager = ref.read(wifiMeshManagerProvider);
+      final ips = peers.map((p) => p.ipAddress).whereType<String>().toList();
+      manager.syncAlerts(next, ips);
+    }
+  });
+
+  // 3. Initial sync when new peers connect
   ref.listen(connectedPeersProvider, (previous, next) {
     if (next.hasValue && next.value!.isNotEmpty) {
       final manager = ref.read(wifiMeshManagerProvider);

@@ -1,9 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/network/wifi_mesh_manager.dart';
-import '../core/crypto/ecdh_manager.dart';
 import '../core/models/ephemeral_peer.dart';
 import '../core/models/message_fragment.dart';
 import '../core/models/public_alert.dart';
+import '../core/models/news_post.dart';
+import '../core/models/safe_route.dart';
 import 'crypto_providers.dart';
 
 import '../core/security/identity_service.dart';
@@ -56,3 +57,12 @@ final incomingAlertsProvider = StreamProvider<List<PublicAlert>>((ref) {
   return manager.alertStream;
 });
 
+final incomingNewsProvider = StreamProvider<List<NewsPost>>((ref) {
+  final manager = ref.watch(wifiMeshManagerProvider);
+  return manager.newsStream;
+});
+
+final incomingRoutesProvider = StreamProvider<List<SafeRoute>>((ref) {
+  final manager = ref.watch(wifiMeshManagerProvider);
+  return manager.routeStream;
+});

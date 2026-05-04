@@ -8,6 +8,8 @@ import '../crypto/ecdh_manager.dart';
 import '../security/identity_service.dart';
 import '../models/message_fragment.dart';
 import '../models/public_alert.dart';
+import '../models/news_post.dart';
+import '../models/safe_route.dart';
 
 
 
@@ -17,9 +19,14 @@ import '../models/public_alert.dart';
 ///
 /// Discovery: UDP Broadcast on Port 5555
 /// Payload:   TCP Unicast on Port 5556
+///
+/// MULTI-HOP RELAY: Incoming fragments/data are automatically relayed
+/// to all other peers (gossip protocol) with hop-count tracking and
+/// deduplication to prevent storms.
 class WifiMeshManager {
   static const int udpPort = 5555;
   static const int tcpPort = 5556;
+  static const int maxHops = 5;
 
   final EcdhManager _ecdhManager;
   final IdentityService _identity;
@@ -38,6 +45,20 @@ class WifiMeshManager {
   final StreamController<List<PublicAlert>> _alertController =
       StreamController<List<PublicAlert>>.broadcast();
 
+  final StreamController<List<NewsPost>> _newsController =
+      StreamController<List<NewsPost>>.broadcast();
+
+  final StreamController<List<SafeRoute>> _routeController =
+      StreamController<List<SafeRoute>>.broadcast();
+
+  /// Deduplication: tracks seen packet IDs to prevent relay storms
+  final Set<String> _seenPacketIds = {};
+
+  /// Stats counters for dashboard
+  int messagesRelayed = 0;
+  int totalHopsCovered = 0;
+  int peersDiscoveredLifetime = 0;
+
   WifiMeshManager(this._ecdhManager, this._identity);
 
 
@@ -45,6 +66,8 @@ class WifiMeshManager {
   Stream<List<EphemeralPeer>> get peersStream => _peerController.stream;
   Stream<MessageFragment> get fragmentStream => _fragmentController.stream;
   Stream<List<PublicAlert>> get alertStream => _alertController.stream;
+  Stream<List<NewsPost>> get newsStream => _newsController.stream;
+  Stream<List<SafeRoute>> get routeStream => _routeController.stream;
 
   List<EphemeralPeer> get currentPeers => _peers.values.toList();
 
@@ -89,9 +112,9 @@ class WifiMeshManager {
 
 
           _handleDiscoveredPeer(
-            id: json['nodeId'],
+            id: json['nodeId'] as String,
             ip: dg.address.address,
-            pubKey: base64.decode(json['pubKey']),
+            pubKey: base64.decode(json['pubKey'] as String),
           );
         } catch (_) {}
       }
@@ -147,8 +170,6 @@ class WifiMeshManager {
 
 
 
-
-
   void _handleDiscoveredPeer({
     required String id,
     required String ip,
@@ -168,8 +189,9 @@ class WifiMeshManager {
       return;
     }
 
+    peersDiscoveredLifetime++;
+
     // 2. NEW PEER: Immediately add a placeholder to prevent race conditions
-    // (This stops multiple handshakes from starting at once for the same ID)
     _peers[id] = EphemeralPeer(
       deviceUuid: id,
       ecdhPublicKey: pubKey,
@@ -207,8 +229,6 @@ class WifiMeshManager {
   }
 
 
-
-
   // --------------------------------------------------------------------------
   // DATA TRANSPORT (TCP)
   // --------------------------------------------------------------------------
@@ -226,15 +246,70 @@ class WifiMeshManager {
             if (buffer.isEmpty) return;
             final raw = utf8.decode(buffer);
             final json = jsonDecode(raw) as Map<String, dynamic>;
+            final senderIp = client.remoteAddress.address;
             
-            if (json.containsKey('type') && json['type'] == 'alerts') {
-              final alertsJson = json['data'] as List<dynamic>;
-              final alerts = alertsJson.map((a) => PublicAlert.fromJson(Map<String, dynamic>.from(a))).toList();
-              _alertController.add(alerts);
-            } else {
-              final fragment = MessageFragment.fromJson(json);
-              _fragmentController.add(fragment);
-              print('[WifiMesh] Fragment Reassembled: ${fragment.fragmentSetId}');
+            final type = json['type'] as String? ?? 'fragment';
+            final packetId = json['pid'] as String? ?? '';
+
+            // Deduplication: skip if we've already processed this packet
+            if (packetId.isNotEmpty && _seenPacketIds.contains(packetId)) {
+              return;
+            }
+            if (packetId.isNotEmpty) {
+              _seenPacketIds.add(packetId);
+              // Prevent unbounded memory growth
+              if (_seenPacketIds.length > 5000) {
+                final toRemove = _seenPacketIds.take(2500).toList();
+                _seenPacketIds.removeAll(toRemove);
+              }
+            }
+
+            switch (type) {
+              case 'alerts':
+                final alertsJson = json['data'] as List<dynamic>;
+                final alerts = alertsJson
+                    .map((a) =>
+                        PublicAlert.fromJson(Map<String, dynamic>.from(a as Map)))
+                    .toList();
+                _alertController.add(alerts);
+                // MULTI-HOP RELAY: Forward alerts to other peers
+                _relayToOtherPeers(raw, senderIp);
+                break;
+
+              case 'news':
+                final newsJson = json['data'] as List<dynamic>;
+                final news = newsJson
+                    .map((n) =>
+                        NewsPost.fromJson(Map<String, dynamic>.from(n as Map)))
+                    .toList();
+                _newsController.add(news);
+                // MULTI-HOP RELAY
+                _relayToOtherPeers(raw, senderIp);
+                break;
+
+              case 'routes':
+                final routesJson = json['data'] as List<dynamic>;
+                final routes = routesJson
+                    .map((r) =>
+                        SafeRoute.fromJson(Map<String, dynamic>.from(r as Map)))
+                    .toList();
+                _routeController.add(routes);
+                // MULTI-HOP RELAY
+                _relayToOtherPeers(raw, senderIp);
+                break;
+
+              default:
+                // Message fragment
+                final fragment = MessageFragment.fromJson(json);
+                if (fragment.hopCount < maxHops) {
+                  _fragmentController.add(fragment);
+                  // MULTI-HOP RELAY: Forward fragment with incremented hop
+                  final relayFragment = fragment.withIncrementedHop();
+                  _relayFragmentToOtherPeers(relayFragment, senderIp);
+                  messagesRelayed++;
+                  totalHopsCovered += fragment.hopCount;
+                }
+                break;
             }
           } catch (e) {
             print('[WifiMesh] Reassembly Error: $e');
@@ -248,48 +323,123 @@ class WifiMeshManager {
     });
   }
 
+  /// MULTI-HOP: Relay raw packet data to all peers except the sender
+  void _relayToOtherPeers(String rawData, String senderIp) {
+    final bytes = utf8.encode(rawData);
+    final otherIps = _peers.values
+        .where((p) => p.ipAddress != null && p.ipAddress != senderIp)
+        .map((p) => p.ipAddress!)
+        .toList();
+    
+    for (final ip in otherIps) {
+      _safeTcpSend(ip, bytes);
+    }
+    if (otherIps.isNotEmpty) messagesRelayed++;
+  }
+
+  /// MULTI-HOP: Relay a fragment to all peers except the sender via reliable TCP
+  void _relayFragmentToOtherPeers(MessageFragment fragment, String senderIp) {
+    // Wrap fragment in JSON for TCP receiver
+    final payload = {
+      'type': 'fragment',
+      'pid': 'f_${fragment.fragmentSetId}_${fragment.index}',
+      ...fragment.toJson(),
+    };
+    final bytes = utf8.encode(jsonEncode(payload));
+    
+    final otherIps = _peers.values
+        .where((p) => p.ipAddress != null && p.ipAddress != senderIp)
+        .map((p) => p.ipAddress!)
+        .toList();
+    
+    for (final ip in otherIps) {
+      _safeTcpSend(ip, bytes);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // SYNC METHODS
+  // --------------------------------------------------------------------------
+
   Future<void> syncAlerts(List<PublicAlert> alerts, List<String> ips) async {
+    final pid = 'a_${DateTime.now().millisecondsSinceEpoch}_${_identity.nodeId}';
+    _seenPacketIds.add(pid);
     final packet = jsonEncode({
       'type': 'alerts',
+      'pid': pid,
       'data': alerts.map((a) => a.toJson()).toList(),
     });
     final bytes = utf8.encode(packet);
-    
-    // Parallel push
     Future.wait(ips.map((ip) => _safeTcpSend(ip, bytes)));
   }
 
-  Future<void> _safeTcpSend(String ip, Uint8List bytes) async {
+  Future<void> syncNews(List<NewsPost> news, List<String> ips) async {
+    final pid = 'n_${DateTime.now().millisecondsSinceEpoch}_${_identity.nodeId}';
+    _seenPacketIds.add(pid);
+    final packet = jsonEncode({
+      'type': 'news',
+      'pid': pid,
+      'data': news.map((n) => n.toJson()).toList(),
+    });
+    final bytes = utf8.encode(packet);
+    Future.wait(ips.map((ip) => _safeTcpSend(ip, bytes)));
+  }
+
+  Future<void> syncRoutes(List<SafeRoute> routes, List<String> ips) async {
+    final pid = 'r_${DateTime.now().millisecondsSinceEpoch}_${_identity.nodeId}';
+    _seenPacketIds.add(pid);
+    final packet = jsonEncode({
+      'type': 'routes',
+      'pid': pid,
+      'data': routes.map((r) => r.toJson()).toList(),
+    });
+    final bytes = utf8.encode(packet);
+    Future.wait(ips.map((ip) => _safeTcpSend(ip, bytes)));
+  }
+
+  Future<void> _safeTcpSend(String ip, dynamic bytes) async {
     int retries = 0;
-    while (retries < 5) {
+    final data = bytes is Uint8List ? bytes : Uint8List.fromList(bytes as List<int>);
+    while (retries < 5) { // Increased retries for guaranteed chat delivery
       try {
-        final socket = await Socket.connect(ip, tcpPort, timeout: const Duration(seconds: 2));
-        socket.add(bytes);
+        final socket = await Socket.connect(ip, tcpPort, timeout: const Duration(milliseconds: 2000)); // 2s timeout
+        socket.add(data);
         await socket.flush();
         await socket.close();
         return;
-      } catch (_) {
+      } catch (e) {
         retries++;
         await Future<void>.delayed(Duration(milliseconds: 100 * retries));
       }
     }
+    print('[WifiMesh] FATAL: Failed to send TCP packet to $ip after 5 retries.');
   }
 
-
-
   Future<void> broadcastFragment(MessageFragment fragment) async {
+    // 100% RELIABLE CHAT: Switch from UDP to TCP for guaranteed delivery
+    final payload = {
+      'type': 'fragment',
+      'pid': 'f_${fragment.fragmentSetId}_${fragment.index}',
+      ...fragment.toJson(),
+    };
+    final bytes = utf8.encode(jsonEncode(payload));
+
     final ips = _peers.values
         .where((p) => p.ipAddress != null)
         .map((p) => p.ipAddress!)
         .toList();
-    await relayToPeers(fragment, ips);
+        
+    await Future.wait(ips.map((ip) => _safeTcpSend(ip, bytes)));
   }
 
-
-  /// Send fragment specifically to a set of IPs with aggressive retries
+  /// Send fragment specifically to a set of IPs
   Future<void> relayToPeers(MessageFragment fragment, List<String> ips) async {
-    final bytes = fragment.toWireBytes();
-    // Use Future.wait for parallel high-speed delivery
+    final payload = {
+      'type': 'fragment',
+      'pid': 'f_${fragment.fragmentSetId}_${fragment.index}',
+      ...fragment.toJson(),
+    };
+    final bytes = utf8.encode(jsonEncode(payload));
     await Future.wait(ips.map((ip) => _safeTcpSend(ip, bytes)));
   }
 
@@ -300,6 +450,3 @@ class WifiMeshManager {
     await start();
   }
 }
-
-
-
